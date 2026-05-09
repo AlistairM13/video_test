@@ -1,0 +1,1539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Decoder Test Bench</title>
+  <!-- mp4box.js for fast MP4 metadata extraction (codec, GOP, frame count, sync samples). -->
+  <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+  <!-- ffmpeg.wasm (single-threaded build — no SharedArrayBuffer / COOP-COEP needed). -->
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+  <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: #0a0a0a;
+      color: #e4e4e7;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1600px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; color: #d4d4d8; }
+    .subtitle { color: #a1a1aa; font-size: 13px; margin-bottom: 16px; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    /* Sidebar (library) */
+    .sidebar {
+      background: #0f0f10;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .sidebar-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px;
+    }
+    .sidebar-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .lib-item {
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 6px;
+      padding: 8px 10px;
+      cursor: pointer;
+      transition: background 100ms, border-color 100ms;
+    }
+    .lib-item:hover { background: #27272a; border-color: #3f3f46; }
+    .lib-item.active { background: #1e3a8a33; border-color: #2563eb; }
+    .lib-name {
+      font-size: 13px; font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .lib-meta {
+      font-size: 11px; color: #71717a; margin-top: 2px;
+      font-family: ui-monospace, monospace;
+    }
+    .lib-tested {
+      display: inline-block;
+      margin-top: 4px;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #1e293b;
+      color: #93c5fd;
+    }
+    .lib-tested.warn { background: #422006; color: #fcd34d; }
+    .lib-tested.bad { background: #450a0a; color: #fca5a5; }
+    .lib-actions { display: flex; gap: 4px; margin-top: 6px; }
+    .lib-actions button {
+      flex: 1;
+      font-size: 11px;
+      padding: 3px 6px;
+    }
+    .empty-lib {
+      color: #52525b;
+      font-size: 12px;
+      text-align: center;
+      padding: 20px 8px;
+    }
+
+    /* Main */
+    .main { display: flex; flex-direction: column; gap: 16px; }
+
+    .drop-zone {
+      border: 2px dashed #3f3f46;
+      border-radius: 12px;
+      padding: 50px 20px;
+      text-align: center;
+      transition: border-color 120ms, background 120ms;
+      cursor: pointer;
+      background: #0f0f10;
+    }
+    .drop-zone.dragover {
+      border-color: #3b82f6;
+      background: #0c1828;
+    }
+    .drop-zone.compact { padding: 20px; }
+    .drop-zone p { margin: 4px 0; }
+    .drop-zone .big { font-size: 16px; color: #d4d4d8; }
+    .drop-zone .small { font-size: 12px; color: #71717a; }
+
+    video {
+      width: 100%;
+      max-height: 50vh;
+      background: #000;
+      border-radius: 8px;
+      display: block;
+    }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #0f0f10;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button {
+      background: #27272a; color: #e4e4e7;
+      border: 1px solid #3f3f46;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 120ms;
+    }
+    button:hover { background: #3f3f46; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: white; }
+    button.primary:hover { background: #1d4ed8; }
+    button.danger { background: #7f1d1d; border-color: #991b1b; color: #fecaca; }
+    button.danger:hover { background: #991b1b; }
+    .speed-label { color: #a1a1aa; font-size: 12px; margin-left: 8px; }
+    .custom-rate {
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .custom-rate input {
+      width: 60px;
+      background: #18181b; color: #e4e4e7;
+      border: 1px solid #3f3f46; border-radius: 6px;
+      padding: 5px 6px; font-size: 13px;
+    }
+
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    @media (min-width: 640px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+    .stat {
+      background: #18181b; border: 1px solid #27272a;
+      border-radius: 6px; padding: 6px 10px;
+    }
+    .stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-value { font-family: ui-monospace, monospace; font-size: 13px; color: #e4e4e7; margin-top: 2px; }
+
+    /* Metadata table */
+    .meta-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+    .meta-table td { padding: 4px 8px; border-bottom: 1px solid #18181b; }
+    .meta-table tr:last-child td { border-bottom: none; }
+    .meta-table .k { color: #a1a1aa; width: 40%; }
+    .meta-table .v { font-family: ui-monospace, monospace; color: #e4e4e7; }
+    .meta-table .v.warn { color: #fcd34d; }
+    .meta-table .v.bad { color: #f87171; }
+    .meta-table .v.good { color: #86efac; }
+    .meta-note { font-size: 11px; color: #71717a; margin-top: 6px; }
+
+    /* Log */
+    .log-list {
+      max-height: 240px;
+      overflow-y: auto;
+      background: #09090b; border: 1px solid #27272a; border-radius: 6px;
+      padding: 8px;
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .log-list .empty { color: #52525b; }
+    .log-entry .t { color: #71717a; }
+    .log-entry.WAITING { color: #fca5a5; }
+    .log-entry.stalled, .log-entry.error { color: #fcd34d; }
+    .log-entry .detail { color: #71717a; }
+
+    .waiting-badge {
+      color: #f87171;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      margin-left: 8px;
+    }
+
+    /* Test history */
+    .results-table { width: 100%; font-size: 11px; border-collapse: collapse; }
+    .results-table th, .results-table td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #18181b; }
+    .results-table th { color: #a1a1aa; font-weight: 500; font-size: 10px; text-transform: uppercase; }
+    .results-table .num { font-family: ui-monospace, monospace; text-align: right; }
+    .results-table .waiting-good { color: #86efac; }
+    .results-table .waiting-warn { color: #fcd34d; }
+    .results-table .waiting-bad { color: #f87171; }
+
+    .test-banner {
+      background: #1e3a8a33;
+      border: 1px solid #2563eb;
+      color: #93c5fd;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .encode-banner {
+      background: #422006;
+      border: 1px solid #b45309;
+      color: #fcd34d;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .progress-bar {
+      width: 100%; height: 6px;
+      background: #18181b;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #f59e0b;
+      transition: width 200ms;
+    }
+    .lib-item .check {
+      float: right;
+      width: 16px; height: 16px;
+      cursor: pointer;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    @media (min-width: 1400px) {
+      .compare-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+      .compare-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+    }
+    .compare-cell {
+      background: #0f0f10;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .compare-cell video {
+      max-height: 30vh;
+      width: 100%;
+    }
+    .compare-cell .name {
+      font-size: 12px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .compare-cell .meta {
+      font-size: 11px; color: #71717a;
+      font-family: ui-monospace, monospace;
+      margin: 4px 0;
+    }
+    .compare-cell .waiting-tally {
+      font-family: ui-monospace, monospace;
+      font-size: 13px;
+      margin-top: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #18181b;
+    }
+    .compare-cell .waiting-tally.bad { background: #450a0a; color: #fca5a5; }
+    .compare-cell .waiting-tally.warn { background: #422006; color: #fcd34d; }
+    .compare-cell .waiting-tally.good { background: #052e16; color: #86efac; }
+    .compare-toolbar {
+      background: #0f0f10;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .footer-note {
+      margin-top: 24px;
+      max-width: 800px;
+      color: #71717a;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .footer-note code {
+      background: #18181b; padding: 1px 4px; border-radius: 3px;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Video Decoder Test Bench</h1>
+    <p class="subtitle">Drag videos in to build a library. Each video is parsed for codec/GOP/bitrate via mp4box, stored in IndexedDB, and can be tested at any playback speed. WAITING events at each speed are saved per video so you can compare what makes one stall and another not.</p>
+
+    <div class="layout">
+      <!-- LEFT: Library sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <h2>Library <span id="libCount" style="color:#71717a;font-weight:400">(0)</span></h2>
+          <button id="addBtn" style="font-size:12px;padding:4px 8px">+ Add</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button id="compareBtn" style="flex:1;font-size:11px;padding:5px" disabled>Compare selected (0)</button>
+          <button id="selectAllBtn" style="font-size:11px;padding:5px">All</button>
+          <button id="selectNoneBtn" style="font-size:11px;padding:5px">None</button>
+        </div>
+        <div class="sidebar-list" id="libList">
+          <div class="empty-lib">No videos yet.<br/>Drag files in to start.</div>
+        </div>
+        <div style="border-top:1px solid #27272a;padding-top:8px;margin-top:8px;font-size:11px;color:#71717a">
+          <button id="clearLibBtn" class="danger" style="width:100%;font-size:11px;padding:4px">Clear library</button>
+        </div>
+      </div>
+
+      <!-- RIGHT: Main -->
+      <div class="main">
+        <div id="dropZone" class="drop-zone">
+          <p class="big">Drop video files here</p>
+          <p class="small">or click to browse · MP4 best (mp4box parses metadata) · WebM/MOV also playable</p>
+          <input type="file" id="fileInput" accept="video/*" hidden multiple />
+        </div>
+
+        <div id="compareSection" style="display:none">
+          <div class="compare-toolbar">
+            <strong style="font-size:14px">Side-by-side comparison</strong>
+            <span id="compareCount" style="color:#71717a;font-size:12px"></span>
+            <span class="speed-label">Speed (all):</span>
+            <button class="cmp-speed" data-rate="1">1x</button>
+            <button class="cmp-speed" data-rate="2">2x</button>
+            <button class="cmp-speed" data-rate="4">4x</button>
+            <button class="cmp-speed" data-rate="8">8x</button>
+            <button class="cmp-speed" data-rate="16">16x</button>
+            <button id="cmpPlayBtn" class="primary">▶ Play all</button>
+            <button id="cmpPauseBtn">⏸ Pause all</button>
+            <button id="cmpRestartBtn">⏮ Restart all</button>
+            <button id="cmpRecordBtn" class="primary" style="margin-left:auto">▶ Record 10s test (all)</button>
+            <button id="cmpExitBtn">Exit compare</button>
+          </div>
+          <div id="compareTestBanner" class="test-banner" style="display:none">
+            <span id="compareTestBannerText">Recording…</span>
+          </div>
+          <div id="compareGrid" class="compare-grid"></div>
+        </div>
+
+        <div id="playerSection" style="display:none">
+          <video id="video" controls muted playsinline></video>
+
+          <div class="controls" style="margin-top:12px">
+            <button id="playBtn">Play</button>
+            <button id="pauseBtn">Pause</button>
+            <button id="restartBtn">⏮ Restart</button>
+            <span class="speed-label">Speed:</span>
+            <button class="speed-btn" data-rate="1">1x</button>
+            <button class="speed-btn" data-rate="2">2x</button>
+            <button class="speed-btn" data-rate="4">4x</button>
+            <button class="speed-btn" data-rate="8">8x</button>
+            <button class="speed-btn" data-rate="16">16x</button>
+            <span class="custom-rate">
+              <input type="number" id="customRate" placeholder="rate" min="0.1" max="64" step="0.5" />
+              <button id="customRateBtn">Set</button>
+            </span>
+            <button id="reencodeBtn" style="margin-left:auto">⚙ Re-encode @ 15/30/60/120 fps</button>
+            <button id="recordTestBtn" class="primary">▶ Record test</button>
+          </div>
+
+          <div id="testBanner" class="test-banner" style="display:none;margin-top:8px">
+            <span id="testBannerText">Recording…</span>
+            <button id="cancelTestBtn" style="font-size:11px;padding:3px 8px">Cancel</button>
+          </div>
+
+          <div id="encodeBanner" class="encode-banner" style="display:none;margin-top:8px">
+            <div id="encodeBannerText">Encoding…</div>
+            <div class="progress-bar"><div class="progress-fill" id="encodeProgress" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <!-- Stats + Metadata -->
+          <div class="card" id="statsCard" style="display:none">
+            <h2>Live stats</h2>
+            <div class="stats">
+              <div class="stat"><div class="stat-label">currentTime</div><div class="stat-value" id="statTime">—</div></div>
+              <div class="stat"><div class="stat-label">buffered</div><div class="stat-value" id="statBuffered">—</div></div>
+              <div class="stat"><div class="stat-label">duration</div><div class="stat-value" id="statDuration">—</div></div>
+              <div class="stat"><div class="stat-label">resolution</div><div class="stat-value" id="statRes">—</div></div>
+              <div class="stat"><div class="stat-label">playbackRate</div><div class="stat-value" id="statRate">—</div></div>
+              <div class="stat"><div class="stat-label">WAITING</div><div class="stat-value" id="statWaiting">0</div></div>
+              <div class="stat"><div class="stat-label">file size</div><div class="stat-value" id="statSize">—</div></div>
+              <div class="stat"><div class="stat-label">file</div><div class="stat-value" id="statName" title="" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</div></div>
+            </div>
+          </div>
+
+          <div class="card" id="metaCard" style="display:none">
+            <h2>Container & codec metadata</h2>
+            <table class="meta-table" id="metaTable"></table>
+            <div class="meta-note" id="metaNote"></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card" id="logCard" style="display:none">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <h2 style="margin:0">Event log <span id="waitingBadge" class="waiting-badge" style="display:none"></span></h2>
+              <button id="clearLog" style="font-size:11px;padding:3px 8px">Clear</button>
+            </div>
+            <div id="logList" class="log-list">
+              <div class="empty">No events yet — press Play.</div>
+            </div>
+          </div>
+
+          <div class="card" id="resultsCard" style="display:none">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <h2 style="margin:0">Test history (this video)</h2>
+              <button id="clearResultsBtn" style="font-size:11px;padding:3px 8px">Clear</button>
+            </div>
+            <table class="results-table" id="resultsTable">
+              <thead><tr><th>When</th><th class="num">Speed</th><th class="num">Tested</th><th class="num">WAITING</th><th class="num">stalls/s</th></tr></thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+            <div class="meta-note" style="margin-top:8px">Click <strong>▶ Record test</strong> to start a 10-second timed run at the current speed. WAITING events during the run are recorded.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p class="footer-note">
+      <strong>How to read this:</strong> WAITING fires when the player advances faster than the decoder can deliver frames. With everything in memory, WAITING == decoder/CPU bottleneck. Compare videos with low vs high WAITING counts at the same speed; look at <code>codec</code>, <code>resolution × fps × rate</code>, <code>avg GOP</code>, and <code>bitrate</code>. Long GOP (>60 frames) means high-speed playback walks long P-frame chains and gets expensive. H.265/AV1 without hardware decode is much slower than H.264.
+    </p>
+  </div>
+
+  <script>
+    // ============================================================
+    // IndexedDB persistence
+    // ============================================================
+    const DB_NAME = 'decoder-test-bench';
+    const DB_VERSION = 1;
+    const STORE_VIDEOS = 'videos';
+    const STORE_RESULTS = 'results';
+
+    function openDb() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(STORE_VIDEOS)) {
+            db.createObjectStore(STORE_VIDEOS, { keyPath: 'name' });
+          }
+          if (!db.objectStoreNames.contains(STORE_RESULTS)) {
+            const s = db.createObjectStore(STORE_RESULTS, { keyPath: 'id', autoIncrement: true });
+            s.createIndex('by-video', 'videoName');
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function dbPut(store, value) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const req = tx.objectStore(store).put(value);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function dbGetAll(store) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function dbDelete(store, key) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const req = tx.objectStore(store).delete(key);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function dbClear(store) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const req = tx.objectStore(store).clear();
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function getResultsForVideo(name) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_RESULTS, 'readonly');
+        const idx = tx.objectStore(STORE_RESULTS).index('by-video');
+        const req = idx.getAll(name);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function deleteResultsForVideo(name) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_RESULTS, 'readwrite');
+        const idx = tx.objectStore(STORE_RESULTS).index('by-video');
+        const req = idx.openCursor(name);
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (cur) { cur.delete(); cur.continue(); } else resolve();
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    // ============================================================
+    // mp4box metadata extraction
+    // ============================================================
+    function parseMp4Metadata(file) {
+      return new Promise((resolve) => {
+        if (typeof MP4Box === 'undefined') {
+          resolve({ error: 'mp4box.js failed to load' });
+          return;
+        }
+        if (!file.name.toLowerCase().endsWith('.mp4') && !file.name.toLowerCase().endsWith('.m4v') && !file.name.toLowerCase().endsWith('.mov')) {
+          resolve({ error: 'Not an MP4-family container — metadata parsing skipped' });
+          return;
+        }
+        const mp4 = MP4Box.createFile();
+        const meta = { syncSamples: [], totalSamples: 0 };
+        let ready = false;
+
+        mp4.onError = (e) => resolve({ error: 'mp4box error: ' + e });
+
+        mp4.onReady = (info) => {
+          ready = true;
+          const v = (info.videoTracks && info.videoTracks[0]) || null;
+          if (!v) {
+            resolve({ error: 'No video track found' });
+            return;
+          }
+          meta.duration = info.duration / info.timescale;
+          meta.brand = info.brands && info.brands.join(',');
+          meta.fragmented = info.isFragmented;
+          meta.codec = v.codec;
+          meta.width = v.video ? v.video.width : v.track_width;
+          meta.height = v.video ? v.video.height : v.track_height;
+          meta.nbSamples = v.nb_samples;
+          meta.trackTimescale = v.timescale;
+          meta.trackDuration = v.duration / v.timescale;
+          meta.bitrate = v.bitrate; // bps; sometimes 0
+          meta.avgFps = meta.trackDuration > 0 ? v.nb_samples / meta.trackDuration : 0;
+          meta.trackId = v.id;
+
+          // Derive simpler codec name
+          const codec = v.codec || '';
+          if (codec.startsWith('avc1')) meta.codecName = 'H.264 / AVC';
+          else if (codec.startsWith('hvc1') || codec.startsWith('hev1')) meta.codecName = 'H.265 / HEVC';
+          else if (codec.startsWith('av01')) meta.codecName = 'AV1';
+          else if (codec.startsWith('vp09')) meta.codecName = 'VP9';
+          else if (codec.startsWith('vp08')) meta.codecName = 'VP8';
+          else meta.codecName = codec;
+
+          // Try to get sync samples for GOP analysis. setExtractionOptions
+          // → onSamples gives sample-level metadata without buffering decoded frames.
+          try {
+            mp4.setExtractionOptions(v.id, null, { nbSamples: 100000, rapAlignement: false });
+            mp4.start();
+          } catch (err) {
+            resolve(meta); // return whatever we have if extraction fails
+          }
+        };
+
+        mp4.onSamples = (id, user, samples) => {
+          for (const s of samples) {
+            if (s.is_sync) meta.syncSamples.push(s.number);
+            meta.totalSamples = Math.max(meta.totalSamples, s.number + 1);
+          }
+        };
+
+        // Buffer the entire file (these tests are local, fine for size).
+        const reader = new FileReader();
+        reader.onload = () => {
+          const ab = reader.result;
+          ab.fileStart = 0;
+          mp4.appendBuffer(ab);
+          mp4.flush();
+          // Give onSamples a tick to flush, then resolve.
+          setTimeout(() => {
+            // GOP analysis from sync sample positions.
+            if (meta.syncSamples.length > 1) {
+              const gops = [];
+              for (let i = 1; i < meta.syncSamples.length; i++) {
+                gops.push(meta.syncSamples[i] - meta.syncSamples[i-1]);
+              }
+              meta.gopCount = meta.syncSamples.length;
+              meta.gopAvg = gops.reduce((s,n) => s+n, 0) / gops.length;
+              meta.gopMin = Math.min(...gops);
+              meta.gopMax = Math.max(...gops);
+            } else if (meta.syncSamples.length === 1) {
+              meta.gopAvg = meta.nbSamples;
+              meta.gopMin = meta.nbSamples;
+              meta.gopMax = meta.nbSamples;
+              meta.gopCount = 1;
+            }
+            resolve(meta);
+          }, 200);
+        };
+        reader.onerror = () => resolve({ error: 'FileReader failed' });
+        reader.readAsArrayBuffer(file);
+
+        // Watchdog
+        setTimeout(() => {
+          if (!ready) resolve({ error: 'mp4box parse timed out (>10s)' });
+        }, 10000);
+      });
+    }
+
+    // ============================================================
+    // UI state
+    // ============================================================
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const video = document.getElementById('video');
+    const libList = document.getElementById('libList');
+    const libCount = document.getElementById('libCount');
+    const playerSection = document.getElementById('playerSection');
+    const statsCard = document.getElementById('statsCard');
+    const metaCard = document.getElementById('metaCard');
+    const logCard = document.getElementById('logCard');
+    const resultsCard = document.getElementById('resultsCard');
+    const speedButtons = document.querySelectorAll('.speed-btn');
+    const waitingBadge = document.getElementById('waitingBadge');
+    const logListEl = document.getElementById('logList');
+    const testBanner = document.getElementById('testBanner');
+    const testBannerText = document.getElementById('testBannerText');
+
+    let library = []; // [{name, size, blob, metadata, savedAt}]
+    let activeVideo = null; // ref to library entry
+    let logEntries = [];
+    let logStart = Date.now();
+    let waitingCount = 0;
+    let currentObjectUrl = null;
+    let activeTest = null; // { speed, startedAt, durationMs, startWaiting, timer }
+
+    function fmtBytes(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+      if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+      return (n/1024/1024/1024).toFixed(2) + ' GB';
+    }
+    function fmtBitrate(bps) {
+      if (!bps) return '—';
+      if (bps < 1e6) return (bps/1e3).toFixed(0) + ' kbps';
+      return (bps/1e6).toFixed(2) + ' Mbps';
+    }
+    function fmtDuration(s) {
+      if (!Number.isFinite(s)) return '—';
+      if (s < 60) return s.toFixed(1) + 's';
+      const m = Math.floor(s/60); const r = s - m*60;
+      return m + 'm ' + r.toFixed(0) + 's';
+    }
+    function fmtTime(ts) {
+      const d = new Date(ts);
+      return d.toLocaleString();
+    }
+
+    // ============================================================
+    // Library management
+    // ============================================================
+    async function loadLibrary() {
+      library = await dbGetAll(STORE_VIDEOS);
+      library.sort((a, b) => b.savedAt - a.savedAt);
+      renderLibrary();
+    }
+
+    async function renderLibrary() {
+      libCount.textContent = '(' + library.length + ')';
+      if (library.length === 0) {
+        libList.innerHTML = '<div class="empty-lib">No videos yet.<br/>Drag files in to start.</div>';
+        return;
+      }
+      // Pre-fetch results for badge counts
+      const resultsByName = {};
+      for (const v of library) {
+        const r = await getResultsForVideo(v.name);
+        resultsByName[v.name] = r;
+      }
+      libList.innerHTML = library.map(v => {
+        const m = v.metadata || {};
+        const isActive = activeVideo && activeVideo.name === v.name;
+        const tests = resultsByName[v.name] || [];
+        const maxSpeed = tests.reduce((mx, t) => Math.max(mx, t.speed), 0);
+        const totalWaiting = tests.reduce((s, t) => s + t.waitingCount, 0);
+        let badge = '';
+        if (tests.length > 0) {
+          let cls = 'lib-tested';
+          if (totalWaiting > 50) cls += ' bad';
+          else if (totalWaiting > 5) cls += ' warn';
+          badge = '<span class="' + cls + '">' + tests.length + ' tests · max ' + maxSpeed + 'x · ' + totalWaiting + ' WAITING</span>';
+        }
+        const dim = (m.width && m.height) ? (m.width + '×' + m.height) : '?';
+        const fps = m.avgFps ? m.avgFps.toFixed(1) + 'fps' : '?';
+        return '<div class="lib-item ' + (isActive ? 'active' : '') + '" data-name="' + escapeAttr(v.name) + '">' +
+          '<div class="lib-name" title="' + escapeAttr(v.name) + '">' + escapeHtml(v.name) + '</div>' +
+          '<div class="lib-meta">' + fmtBytes(v.size) + ' · ' + dim + ' · ' + fps +
+          (m.codecName ? ' · ' + escapeHtml(m.codecName) : '') + '</div>' +
+          (badge ? '<div>' + badge + '</div>' : '') +
+          '<div class="lib-actions">' +
+            '<button data-act="play">Open</button>' +
+            '<button data-act="del" class="danger">Delete</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      libList.querySelectorAll('.lib-item').forEach(el => {
+        const name = el.dataset.name;
+        el.querySelector('[data-act="play"]').addEventListener('click', (e) => {
+          e.stopPropagation();
+          openVideo(name);
+        });
+        el.querySelector('[data-act="del"]').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm('Delete "' + name + '" and all its test results?')) return;
+          await dbDelete(STORE_VIDEOS, name);
+          await deleteResultsForVideo(name);
+          if (activeVideo && activeVideo.name === name) {
+            closeActiveVideo();
+          }
+          await loadLibrary();
+        });
+        el.addEventListener('click', () => openVideo(name));
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+    function escapeAttr(s) {
+      return escapeHtml(s);
+    }
+
+    async function addFiles(files) {
+      const dropped = Array.from(files).filter(f => f.type.startsWith('video/'));
+      if (dropped.length === 0) {
+        alert('Please drop a video file.');
+        return;
+      }
+      for (const file of dropped) {
+        // Avoid duplicate names — append timestamp
+        let name = file.name;
+        if (library.some(v => v.name === name)) {
+          const dot = name.lastIndexOf('.');
+          const stamp = '-' + Date.now();
+          name = dot < 0 ? (name + stamp) : (name.slice(0, dot) + stamp + name.slice(dot));
+        }
+
+        // Parse metadata first (gives feedback before storage)
+        const metadata = await parseMp4Metadata(file);
+
+        await dbPut(STORE_VIDEOS, {
+          name,
+          size: file.size,
+          type: file.type,
+          blob: file,
+          metadata,
+          savedAt: Date.now(),
+        });
+      }
+      await loadLibrary();
+      // Auto-open the first added if none active
+      if (!activeVideo && dropped.length > 0) {
+        openVideo(library[0].name);
+      }
+    }
+
+    async function openVideo(name) {
+      const entry = library.find(v => v.name === name);
+      if (!entry) return;
+      activeVideo = entry;
+
+      if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = URL.createObjectURL(entry.blob);
+
+      clearLog();
+      video.src = currentObjectUrl;
+      playerSection.style.display = '';
+      statsCard.style.display = '';
+      metaCard.style.display = '';
+      logCard.style.display = '';
+      resultsCard.style.display = '';
+      dropZone.classList.add('compact');
+
+      document.getElementById('statName').textContent = entry.name;
+      document.getElementById('statName').title = entry.name;
+      document.getElementById('statSize').textContent = fmtBytes(entry.size);
+
+      renderMetadata(entry.metadata);
+      await renderResults();
+      await loadLibrary(); // refresh active highlight
+    }
+
+    function closeActiveVideo() {
+      activeVideo = null;
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      playerSection.style.display = 'none';
+      statsCard.style.display = 'none';
+      metaCard.style.display = 'none';
+      logCard.style.display = 'none';
+      resultsCard.style.display = 'none';
+      dropZone.classList.remove('compact');
+    }
+
+    // ============================================================
+    // Metadata rendering
+    // ============================================================
+    function renderMetadata(m) {
+      const t = document.getElementById('metaTable');
+      const note = document.getElementById('metaNote');
+      if (!m || m.error) {
+        t.innerHTML = '<tr><td colspan="2" style="color:#71717a">' + escapeHtml(m && m.error ? m.error : 'No metadata') + '</td></tr>';
+        note.textContent = '';
+        return;
+      }
+
+      const rows = [];
+      const totalPixelsPerSec = m.width && m.height && m.avgFps ? m.width * m.height * m.avgFps : 0;
+      const codecCls = m.codecName && m.codecName.includes('H.265') ? 'warn' : (m.codecName && m.codecName.includes('AV1') ? 'warn' : 'good');
+      const gopAvg = m.gopAvg || 0;
+      const gopCls = gopAvg > 120 ? 'bad' : (gopAvg > 60 ? 'warn' : 'good');
+      const fpsCls = '';
+      const resCls = (m.width >= 3000 || (totalPixelsPerSec > 60 * 1920 * 1080)) ? 'warn' : '';
+
+      const push = (k, v, cls) => rows.push('<tr><td class="k">' + k + '</td><td class="v ' + (cls||'') + '">' + v + '</td></tr>');
+
+      push('Codec', m.codecName + ' <span style="color:#71717a">(' + (m.codec||'?') + ')</span>', codecCls);
+      push('Resolution', (m.width||'?') + ' × ' + (m.height||'?'), resCls);
+      push('FPS', m.avgFps ? m.avgFps.toFixed(2) : '?', fpsCls);
+      push('Duration', fmtDuration(m.trackDuration || m.duration));
+      push('Frames (samples)', (m.nbSamples||'?').toLocaleString());
+      push('Bitrate', fmtBitrate(m.bitrate));
+      push('Container brand', m.brand || '?');
+      push('Fragmented MP4', m.fragmented ? 'yes' : 'no');
+      if (m.gopCount) {
+        push('Keyframes (sync)', m.gopCount.toLocaleString());
+        push('Avg GOP (frames)', m.gopAvg.toFixed(1) + (m.avgFps ? ' (~' + (m.gopAvg/m.avgFps).toFixed(2) + 's)' : ''), gopCls);
+        push('GOP min / max', m.gopMin + ' / ' + m.gopMax);
+      }
+      if (totalPixelsPerSec > 0) {
+        const mp = (totalPixelsPerSec / 1e6).toFixed(1);
+        push('Decode load @ 1x', mp + ' MP/s', mp > 120 ? 'warn' : '');
+        push('Decode load @ 16x', (totalPixelsPerSec * 16 / 1e6).toFixed(1) + ' MP/s', (totalPixelsPerSec * 16 / 1e6) > 1500 ? 'bad' : ((totalPixelsPerSec * 16 / 1e6) > 800 ? 'warn' : ''));
+      }
+
+      t.innerHTML = rows.join('');
+
+      // Build a heuristic note
+      const flags = [];
+      if (m.codecName && m.codecName.includes('H.265')) flags.push('H.265 typically lacks hardware decode in many browsers — slow at high speeds.');
+      if (m.codecName && m.codecName.includes('AV1')) flags.push('AV1 hardware decode is rare on older GPUs — expect software fallback.');
+      if (gopAvg > 120) flags.push('Long GOP (' + gopAvg.toFixed(0) + ' frames) — high-speed playback pays for long P-frame chains. Re-encode with ' + (m.avgFps ? '-g ' + Math.round(m.avgFps/2) : 'shorter -g') + ' for snappier seeks.');
+      if (m.width >= 3000) flags.push('Very wide source (' + m.width + 'px) — multi-cam stitch? Decode cost scales with pixel count.');
+      if (totalPixelsPerSec > 0 && totalPixelsPerSec * 16 / 1e6 > 1500) flags.push('At 16x this video needs ~' + (totalPixelsPerSec * 16 / 1e6).toFixed(0) + ' MP/s of decode throughput — likely above hardware ceiling.');
+      note.innerHTML = flags.length ? flags.map(f => '⚠ ' + escapeHtml(f)).join('<br/>') : '<span style="color:#86efac">No obvious decoder red flags.</span>';
+    }
+
+    // ============================================================
+    // Test results rendering
+    // ============================================================
+    async function renderResults() {
+      if (!activeVideo) return;
+      const results = await getResultsForVideo(activeVideo.name);
+      results.sort((a, b) => b.testedAt - a.testedAt);
+      const body = document.getElementById('resultsBody');
+      if (results.length === 0) {
+        body.innerHTML = '<tr><td colspan="5" style="color:#71717a;text-align:center;padding:12px">No tests recorded yet.</td></tr>';
+        return;
+      }
+      body.innerHTML = results.map(r => {
+        const stallsPerSec = r.durationMs > 0 ? (r.waitingCount / (r.durationMs/1000)) : 0;
+        const cls = r.waitingCount === 0 ? 'waiting-good' : (r.waitingCount > 20 ? 'waiting-bad' : 'waiting-warn');
+        return '<tr>' +
+          '<td>' + fmtTime(r.testedAt) + '</td>' +
+          '<td class="num">' + r.speed + 'x</td>' +
+          '<td class="num">' + (r.durationMs/1000).toFixed(1) + 's</td>' +
+          '<td class="num ' + cls + '">' + r.waitingCount + '</td>' +
+          '<td class="num ' + cls + '">' + stallsPerSec.toFixed(2) + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    // ============================================================
+    // Recorded test (10s timed run at current speed)
+    // ============================================================
+    const TEST_DURATION_MS = 10000;
+    async function startRecordedTest() {
+      if (!activeVideo) return;
+      if (activeTest) return;
+      const speed = video.playbackRate;
+      const startWaiting = waitingCount;
+      const startedAt = Date.now();
+      activeTest = { speed, startedAt, startWaiting };
+      testBanner.style.display = '';
+      const tick = () => {
+        const elapsed = Date.now() - activeTest.startedAt;
+        const remain = Math.max(0, TEST_DURATION_MS - elapsed);
+        testBannerText.textContent = 'Recording at ' + speed + 'x — ' + (remain/1000).toFixed(1) + 's left · WAITING so far: ' + (waitingCount - activeTest.startWaiting);
+        if (remain === 0) finishRecordedTest();
+      };
+      tick();
+      activeTest.timer = setInterval(tick, 200);
+      // Make sure it's actually playing
+      if (video.paused) await video.play();
+    }
+    async function finishRecordedTest() {
+      if (!activeTest) return;
+      clearInterval(activeTest.timer);
+      const durationMs = Date.now() - activeTest.startedAt;
+      const result = {
+        videoName: activeVideo.name,
+        speed: activeTest.speed,
+        durationMs,
+        waitingCount: waitingCount - activeTest.startWaiting,
+        testedAt: Date.now(),
+      };
+      activeTest = null;
+      testBanner.style.display = 'none';
+      await dbPut(STORE_RESULTS, result);
+      await renderResults();
+      await loadLibrary(); // refresh badges
+    }
+    function cancelRecordedTest() {
+      if (!activeTest) return;
+      clearInterval(activeTest.timer);
+      activeTest = null;
+      testBanner.style.display = 'none';
+    }
+
+    document.getElementById('recordTestBtn').addEventListener('click', startRecordedTest);
+    document.getElementById('cancelTestBtn').addEventListener('click', cancelRecordedTest);
+
+    // ============================================================
+    // Log + stats
+    // ============================================================
+    function pushLog(event, detail) {
+      const t = Date.now() - logStart;
+      logEntries.push({ t, event, detail });
+      if (logEntries.length > 500) logEntries = logEntries.slice(-500);
+      if (event === 'WAITING') {
+        waitingCount++;
+        waitingBadge.style.display = '';
+        waitingBadge.textContent = 'WAITING×' + waitingCount;
+        document.getElementById('statWaiting').textContent = String(waitingCount);
+      }
+      renderLog();
+    }
+
+    function renderLog() {
+      if (logEntries.length === 0) {
+        logListEl.innerHTML = '<div class="empty">No events yet — press Play.</div>';
+        return;
+      }
+      logListEl.innerHTML = logEntries.slice(-200).map(e => {
+        return '<div class="log-entry ' + e.event + '">' +
+               '<span class="t">' + (e.t/1000).toFixed(2) + 's</span> ' +
+               escapeHtml(e.event) +
+               (e.detail ? ' <span class="detail">' + escapeHtml(e.detail) + '</span>' : '') +
+               '</div>';
+      }).join('');
+      logListEl.scrollTop = logListEl.scrollHeight;
+    }
+
+    function clearLog() {
+      logEntries = [];
+      waitingCount = 0;
+      logStart = Date.now();
+      waitingBadge.style.display = 'none';
+      document.getElementById('statWaiting').textContent = '0';
+      renderLog();
+    }
+    document.getElementById('clearLog').addEventListener('click', clearLog);
+
+    document.getElementById('clearResultsBtn').addEventListener('click', async () => {
+      if (!activeVideo) return;
+      if (!confirm('Clear test results for "' + activeVideo.name + '"?')) return;
+      await deleteResultsForVideo(activeVideo.name);
+      await renderResults();
+      await loadLibrary();
+    });
+
+    document.getElementById('clearLibBtn').addEventListener('click', async () => {
+      if (!confirm('Delete all videos and test results?')) return;
+      await dbClear(STORE_VIDEOS);
+      await dbClear(STORE_RESULTS);
+      closeActiveVideo();
+      await loadLibrary();
+    });
+
+    document.getElementById('addBtn').addEventListener('click', () => fileInput.click());
+
+    // ============================================================
+    // Drag & drop / file input
+    // ============================================================
+    ['dragenter', 'dragover'].forEach(evt => {
+      dropZone.addEventListener(evt, e => {
+        e.preventDefault();
+        dropZone.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+      dropZone.addEventListener(evt, e => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+      });
+    });
+    dropZone.addEventListener('drop', e => {
+      addFiles(e.dataTransfer.files);
+    });
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', e => {
+      if (e.target.files.length) addFiles(e.target.files);
+      fileInput.value = '';
+    });
+
+    document.body.addEventListener('dragover', e => e.preventDefault());
+    document.body.addEventListener('drop', e => {
+      e.preventDefault();
+      if (e.target === dropZone || dropZone.contains(e.target)) return;
+      if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    });
+
+    // ============================================================
+    // Video element events
+    // ============================================================
+    const events = ['waiting', 'canplay', 'loadeddata', 'loadedmetadata', 'stalled', 'playing', 'ratechange', 'error', 'pause', 'play', 'ended', 'seeking', 'seeked'];
+    events.forEach(evt => {
+      video.addEventListener(evt, () => {
+        let detail = '';
+        if (evt === 'waiting' || evt === 'stalled') {
+          detail = 't=' + video.currentTime.toFixed(2) + 's buffered=' +
+                   (video.buffered.length ? video.buffered.end(0).toFixed(1) : '0') + 's';
+        } else if (evt === 'canplay') {
+          detail = 'buffered=' + (video.buffered.length ? video.buffered.end(0).toFixed(1) : '0') + 's';
+        } else if (evt === 'loadedmetadata') {
+          detail = video.videoWidth + 'x' + video.videoHeight + ' duration=' + video.duration.toFixed(1) + 's';
+        } else if (evt === 'playing' || evt === 'ratechange') {
+          detail = 'rate=' + video.playbackRate;
+        } else if (evt === 'error') {
+          detail = 'code=' + (video.error ? video.error.code : '?');
+        }
+        const displayName = evt === 'waiting' ? 'WAITING' : evt;
+        pushLog(displayName, detail);
+      });
+    });
+
+    // Live stats
+    setInterval(() => {
+      if (!video.src) return;
+      document.getElementById('statTime').textContent = video.currentTime.toFixed(2) + 's';
+      document.getElementById('statBuffered').textContent =
+        (video.buffered.length ? video.buffered.end(0).toFixed(1) : '0') + 's';
+      document.getElementById('statDuration').textContent =
+        (Number.isFinite(video.duration) ? video.duration.toFixed(1) : '—') + 's';
+      document.getElementById('statRes').textContent =
+        video.videoWidth ? video.videoWidth + '×' + video.videoHeight : '—';
+      document.getElementById('statRate').textContent = video.playbackRate + 'x';
+    }, 250);
+
+    // ============================================================
+    // Controls
+    // ============================================================
+    document.getElementById('playBtn').addEventListener('click', () => video.play());
+    document.getElementById('pauseBtn').addEventListener('click', () => video.pause());
+    document.getElementById('restartBtn').addEventListener('click', () => { video.currentTime = 0; });
+
+    function highlightSpeed(rate) {
+      speedButtons.forEach(btn => {
+        const r = parseFloat(btn.dataset.rate);
+        btn.classList.toggle('primary', r === rate);
+      });
+    }
+
+    speedButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const rate = parseFloat(btn.dataset.rate);
+        video.playbackRate = rate;
+        highlightSpeed(rate);
+      });
+    });
+
+    document.getElementById('customRateBtn').addEventListener('click', () => {
+      const v = parseFloat(document.getElementById('customRate').value);
+      if (!Number.isFinite(v) || v <= 0) return;
+      video.playbackRate = v;
+      highlightSpeed(v);
+    });
+    document.getElementById('customRate').addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('customRateBtn').click();
+    });
+
+    // ============================================================
+    // ffmpeg.wasm — lazy-loaded re-encode
+    // ============================================================
+    let ffmpegInstance = null;
+    let ffmpegLoading = null;
+    async function getFfmpeg() {
+      if (ffmpegInstance) return ffmpegInstance;
+      if (ffmpegLoading) return ffmpegLoading;
+      ffmpegLoading = (async () => {
+        if (!window.FFmpegWASM) throw new Error('ffmpeg.wasm script failed to load');
+        if (!window.FFmpegUtil || !window.FFmpegUtil.toBlobURL) {
+          throw new Error('@ffmpeg/util script failed to load');
+        }
+        const { FFmpeg } = window.FFmpegWASM;
+        const { toBlobURL } = window.FFmpegUtil;
+
+        const f = new FFmpeg();
+        f.on('progress', ({ progress }) => {
+          const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
+          document.getElementById('encodeProgress').style.width = pct + '%';
+        });
+        f.on('log', ({ message }) => {
+          if (message && message.length < 500) console.log('[ffmpeg]', message);
+        });
+
+        // When this HTML is opened from disk (file://) the browser blocks
+        // cross-origin Workers. Fetching each asset and wrapping it in a
+        // same-origin Blob URL is the documented offline/local-file pattern
+        // for ffmpeg.wasm 0.12.x. We use jsdelivr — unpkg has occasional
+        // 502s and slow worker chunk responses.
+        const ffmpegBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+        const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+        const banner = document.getElementById('encodeBannerText');
+        const setText = (s) => {
+          if (banner) banner.textContent = s;
+          console.log('[ffmpeg-init]', s);
+        };
+
+        setText('Fetching ffmpeg worker chunk…');
+        const classWorkerURL = await toBlobURL(`${ffmpegBase}/814.ffmpeg.js`, 'text/javascript');
+        console.log('[ffmpeg-init] classWorkerURL ready:', classWorkerURL);
+
+        setText('Fetching ffmpeg core JS (~5 MB)…');
+        const coreURL = await toBlobURL(`${coreBase}/ffmpeg-core.js`, 'text/javascript');
+        console.log('[ffmpeg-init] coreURL ready:', coreURL);
+
+        setText('Fetching ffmpeg core wasm (~30 MB, first run only)…');
+        const wasmURL = await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm');
+        console.log('[ffmpeg-init] wasmURL ready:', wasmURL);
+
+        setText('Initializing ffmpeg.wasm (spawning worker, compiling wasm)…');
+        // Race against a 60s timeout so a silent worker failure doesn't
+        // hang the UI forever — surfaces a real error message instead.
+        const loadPromise = f.load({ classWorkerURL, coreURL, wasmURL });
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(
+            'ffmpeg.load() timed out after 60s. Check DevTools console for [ffmpeg] log lines and any worker errors. ' +
+            'Common cause when opening from file://: Chrome blocks the worker silently. Try serving via http://localhost (e.g. via the Vite dev server) and reload.'
+          )), 60000)
+        );
+        await Promise.race([loadPromise, timeoutPromise]);
+        console.log('[ffmpeg-init] load complete');
+        ffmpegInstance = f;
+        return f;
+      })();
+      return ffmpegLoading;
+    }
+
+    const REENCODE_FPS_TARGETS = [15, 30, 60, 120];
+
+    function deriveVariantName(originalName, fps) {
+      const dot = originalName.lastIndexOf('.');
+      const stem = dot < 0 ? originalName : originalName.slice(0, dot);
+      const ext = dot < 0 ? '.mp4' : originalName.slice(dot);
+      return `${stem}@${fps}fps${ext}`;
+    }
+
+    async function reencodeActiveAtAllRates() {
+      if (!activeVideo) return;
+      const banner = document.getElementById('encodeBanner');
+      const text = document.getElementById('encodeBannerText');
+      const fill = document.getElementById('encodeProgress');
+      const reencodeBtn = document.getElementById('reencodeBtn');
+
+      const sourceName = activeVideo.name;
+      const sourceBlob = activeVideo.blob;
+
+      reencodeBtn.disabled = true;
+      banner.style.display = '';
+      try {
+        text.textContent = 'Loading ffmpeg.wasm (~30 MB, first run only)…';
+        fill.style.width = '0%';
+        const ffmpeg = await getFfmpeg();
+
+        text.textContent = 'Writing source to virtual FS…';
+        const { fetchFile } = window.FFmpegUtil;
+        const inputPath = 'input.mp4';
+        await ffmpeg.writeFile(inputPath, await fetchFile(sourceBlob));
+
+        const created = [];
+        for (let i = 0; i < REENCODE_FPS_TARGETS.length; i++) {
+          const fps = REENCODE_FPS_TARGETS[i];
+          const outName = deriveVariantName(sourceName, fps);
+          // Skip if already in library
+          if (library.some(v => v.name === outName)) {
+            text.textContent = `Skipping ${outName} (already in library)`;
+            continue;
+          }
+          text.textContent = `Encoding @ ${fps}fps (${i+1}/${REENCODE_FPS_TARGETS.length}) — ${outName}`;
+          fill.style.width = '0%';
+          // -vf fps=N forces output frame rate (drop / duplicate as needed).
+          // ultrafast preset keeps wasm encode time bearable.
+          const outPath = `out_${fps}.mp4`;
+          await ffmpeg.exec([
+            '-i', inputPath,
+            '-vf', `fps=${fps}`,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '23',
+            '-an',
+            '-pix_fmt', 'yuv420p',
+            outPath,
+          ]);
+          const data = await ffmpeg.readFile(outPath);
+          const blob = new Blob([data.buffer], { type: 'video/mp4' });
+
+          // Parse metadata for the new variant
+          const metaFile = new File([blob], outName, { type: 'video/mp4' });
+          const metadata = await parseMp4Metadata(metaFile);
+
+          await dbPut(STORE_VIDEOS, {
+            name: outName,
+            size: blob.size,
+            type: 'video/mp4',
+            blob,
+            metadata,
+            savedAt: Date.now(),
+            sourceName, // back-reference
+          });
+
+          // Cleanup wasm FS to free memory
+          try { await ffmpeg.deleteFile(outPath); } catch {}
+          created.push(outName);
+        }
+        try { await ffmpeg.deleteFile(inputPath); } catch {}
+
+        text.textContent = `Done — created ${created.length} variant(s). Selecting them for comparison…`;
+        await loadLibrary();
+        // Auto-select all created variants + the source for compare
+        selectedForCompare.clear();
+        selectedForCompare.add(sourceName);
+        for (const n of created) selectedForCompare.add(n);
+        await renderLibrary();
+        updateCompareButton();
+        // Auto-enter compare mode if there are at least 2
+        if (selectedForCompare.size >= 2) {
+          setTimeout(() => { enterCompareMode(); }, 600);
+        }
+      } catch (err) {
+        text.textContent = 'Encoding failed: ' + (err && err.message ? err.message : String(err));
+        console.error(err);
+      } finally {
+        reencodeBtn.disabled = false;
+        setTimeout(() => { banner.style.display = 'none'; }, 1500);
+      }
+    }
+
+    document.getElementById('reencodeBtn').addEventListener('click', reencodeActiveAtAllRates);
+
+    // ============================================================
+    // Multi-select for compare mode
+    // ============================================================
+    const selectedForCompare = new Set();
+
+    function updateCompareButton() {
+      const btn = document.getElementById('compareBtn');
+      const n = selectedForCompare.size;
+      btn.textContent = `Compare selected (${n})`;
+      btn.disabled = n < 2;
+    }
+
+    document.getElementById('selectAllBtn').addEventListener('click', async () => {
+      for (const v of library) selectedForCompare.add(v.name);
+      await renderLibrary();
+      updateCompareButton();
+    });
+    document.getElementById('selectNoneBtn').addEventListener('click', async () => {
+      selectedForCompare.clear();
+      await renderLibrary();
+      updateCompareButton();
+    });
+    document.getElementById('compareBtn').addEventListener('click', enterCompareMode);
+
+    // Inject checkboxes by patching renderLibrary post-render (delegated click handler)
+    libList.addEventListener('change', (e) => {
+      const t = e.target;
+      if (t && t.classList && t.classList.contains('check')) {
+        const item = t.closest('.lib-item');
+        if (!item) return;
+        const name = item.dataset.name;
+        if (t.checked) selectedForCompare.add(name);
+        else selectedForCompare.delete(name);
+        updateCompareButton();
+      }
+    });
+
+    // Override renderLibrary to inject checkboxes (preserve existing behavior)
+    const origRenderLibrary = renderLibrary;
+    renderLibrary = async function patchedRenderLibrary() {
+      await origRenderLibrary.apply(this, arguments);
+      // Decorate each item with a checkbox
+      libList.querySelectorAll('.lib-item').forEach(el => {
+        const name = el.dataset.name;
+        if (el.querySelector('.check')) return;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'check';
+        cb.checked = selectedForCompare.has(name);
+        cb.title = 'Select for compare';
+        cb.addEventListener('click', e => e.stopPropagation());
+        const nameEl = el.querySelector('.lib-name');
+        if (nameEl) nameEl.appendChild(cb);
+      });
+    };
+
+    // ============================================================
+    // Compare grid view
+    // ============================================================
+    const compareSection = document.getElementById('compareSection');
+    const compareGrid = document.getElementById('compareGrid');
+    const compareCount = document.getElementById('compareCount');
+    let compareCells = []; // [{name, video, blobUrl, waiting, listeners[]}]
+    let compareTest = null; // { speed, startedAt, durationMs, startWaiting: Map }
+
+    function exitCompareMode() {
+      // Tear down videos & object URLs
+      for (const c of compareCells) {
+        try {
+          c.video.pause();
+          c.video.removeAttribute('src');
+          c.video.load();
+          for (const [evt, fn] of c.listeners) c.video.removeEventListener(evt, fn);
+        } catch {}
+        if (c.blobUrl) URL.revokeObjectURL(c.blobUrl);
+      }
+      compareCells = [];
+      compareGrid.innerHTML = '';
+      compareSection.style.display = 'none';
+      // Restore single-player UI if a video was open
+      if (activeVideo) {
+        playerSection.style.display = '';
+        statsCard.style.display = '';
+        metaCard.style.display = '';
+        logCard.style.display = '';
+        resultsCard.style.display = '';
+      } else {
+        dropZone.classList.remove('compact');
+      }
+    }
+    document.getElementById('cmpExitBtn').addEventListener('click', exitCompareMode);
+
+    function enterCompareMode() {
+      const names = Array.from(selectedForCompare);
+      if (names.length < 2) return;
+
+      // Hide single-player UI
+      playerSection.style.display = 'none';
+      statsCard.style.display = 'none';
+      metaCard.style.display = 'none';
+      logCard.style.display = 'none';
+      resultsCard.style.display = 'none';
+      dropZone.classList.add('compact');
+
+      compareSection.style.display = '';
+      compareGrid.innerHTML = '';
+      compareGrid.classList.remove('cols-3', 'cols-4');
+      if (names.length === 3) compareGrid.classList.add('cols-3');
+      else if (names.length >= 4) compareGrid.classList.add('cols-4');
+
+      compareCells = [];
+
+      for (const name of names) {
+        const entry = library.find(v => v.name === name);
+        if (!entry) continue;
+
+        const cell = document.createElement('div');
+        cell.className = 'compare-cell';
+        const m = entry.metadata || {};
+        const dim = (m.width && m.height) ? (m.width + '×' + m.height) : '?';
+        const fps = m.avgFps ? m.avgFps.toFixed(1) + ' fps' : '?';
+        const codec = m.codecName ? m.codecName : '';
+        const decode16 = (m.width && m.height && m.avgFps)
+          ? ((m.width * m.height * m.avgFps * 16) / 1e6).toFixed(0) + ' MP/s'
+          : '—';
+        cell.innerHTML =
+          `<div class="name" title="${escapeAttr(entry.name)}">${escapeHtml(entry.name)}</div>` +
+          `<div class="meta">${dim} · ${fps} · ${escapeHtml(codec)} · ${fmtBytes(entry.size)} · @16x: ${decode16}</div>` +
+          `<video controls muted playsinline></video>` +
+          `<div class="waiting-tally" data-cell="${escapeAttr(entry.name)}">WAITING: 0 · t=0.00s</div>`;
+        compareGrid.appendChild(cell);
+
+        const v = cell.querySelector('video');
+        const tally = cell.querySelector('.waiting-tally');
+        const blobUrl = URL.createObjectURL(entry.blob);
+        v.src = blobUrl;
+
+        const cellState = { name: entry.name, video: v, blobUrl, waiting: 0, tally, listeners: [] };
+
+        const onWaiting = () => {
+          cellState.waiting++;
+          updateTally(cellState);
+        };
+        const onTimeUpdate = () => updateTally(cellState);
+        v.addEventListener('waiting', onWaiting);
+        v.addEventListener('timeupdate', onTimeUpdate);
+        cellState.listeners.push(['waiting', onWaiting], ['timeupdate', onTimeUpdate]);
+
+        compareCells.push(cellState);
+      }
+      compareCount.textContent = `(${compareCells.length} videos)`;
+    }
+
+    function updateTally(cell) {
+      const w = cell.waiting;
+      const cls = w === 0 ? 'good' : (w > 20 ? 'bad' : 'warn');
+      cell.tally.className = 'waiting-tally ' + cls;
+      cell.tally.textContent = `WAITING: ${w} · t=${cell.video.currentTime.toFixed(2)}s · rate=${cell.video.playbackRate}x`;
+    }
+
+    function setCompareSpeed(rate) {
+      for (const c of compareCells) c.video.playbackRate = rate;
+      document.querySelectorAll('.cmp-speed').forEach(b => {
+        b.classList.toggle('primary', parseFloat(b.dataset.rate) === rate);
+      });
+    }
+    document.querySelectorAll('.cmp-speed').forEach(b => {
+      b.addEventListener('click', () => setCompareSpeed(parseFloat(b.dataset.rate)));
+    });
+    document.getElementById('cmpPlayBtn').addEventListener('click', () => {
+      for (const c of compareCells) c.video.play();
+    });
+    document.getElementById('cmpPauseBtn').addEventListener('click', () => {
+      for (const c of compareCells) c.video.pause();
+    });
+    document.getElementById('cmpRestartBtn').addEventListener('click', () => {
+      for (const c of compareCells) { c.video.currentTime = 0; c.waiting = 0; updateTally(c); }
+    });
+
+    document.getElementById('cmpRecordBtn').addEventListener('click', async () => {
+      if (compareTest) return;
+      const speed = compareCells.length ? compareCells[0].video.playbackRate : 1;
+      const startWaiting = new Map();
+      for (const c of compareCells) startWaiting.set(c.name, c.waiting);
+      compareTest = { speed, startedAt: Date.now(), durationMs: 10000, startWaiting };
+      const banner = document.getElementById('compareTestBanner');
+      const text = document.getElementById('compareTestBannerText');
+      banner.style.display = '';
+
+      // Start playback
+      for (const c of compareCells) {
+        if (c.video.paused) c.video.play().catch(() => {});
+      }
+
+      const tick = setInterval(() => {
+        const elapsed = Date.now() - compareTest.startedAt;
+        const remain = Math.max(0, compareTest.durationMs - elapsed);
+        const counts = compareCells.map(c => `${c.name.split('@').pop().replace('.mp4','')||c.name.slice(0,8)}: ${c.waiting - (compareTest.startWaiting.get(c.name)||0)}`).join(' · ');
+        text.textContent = `Recording @ ${speed}x — ${(remain/1000).toFixed(1)}s left · ${counts}`;
+        if (remain === 0) {
+          clearInterval(tick);
+          finishCompareTest();
+        }
+      }, 200);
+      compareTest.timer = tick;
+    });
+
+    async function finishCompareTest() {
+      if (!compareTest) return;
+      const banner = document.getElementById('compareTestBanner');
+      const speed = compareTest.speed;
+      const durationMs = Date.now() - compareTest.startedAt;
+      // Persist a result row per cell
+      for (const c of compareCells) {
+        const start = compareTest.startWaiting.get(c.name) || 0;
+        const w = c.waiting - start;
+        await dbPut(STORE_RESULTS, {
+          videoName: c.name,
+          speed,
+          durationMs,
+          waitingCount: w,
+          testedAt: Date.now(),
+        });
+      }
+      compareTest = null;
+      banner.style.display = 'none';
+      await loadLibrary(); // refresh badges
+    }
+
+    // ============================================================
+    // Init
+    // ============================================================
+    loadLibrary();
+  </script>
+</body>
+</html>
