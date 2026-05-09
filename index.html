@@ -6,9 +6,11 @@
   <title>Video Decoder Test Bench</title>
   <!-- mp4box.js for fast MP4 metadata extraction (codec, GOP, frame count, sync samples). -->
   <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
-  <!-- ffmpeg.wasm (single-threaded build — no SharedArrayBuffer / COOP-COEP needed). -->
-  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-  <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+  <!-- ffmpeg.wasm 0.11.6 — older but more reliable for CDN/Pages hosting.
+       0.12.x's UMD worker uses ES module imports for the core, which fails
+       on cross-origin loads. 0.11.6 uses classic script importScripts and
+       works directly with a corePath to jsdelivr. -->
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
   <style>
     * { box-sizing: border-box; }
     html, body {
@@ -1141,56 +1143,36 @@
       if (ffmpegInstance) return ffmpegInstance;
       if (ffmpegLoading) return ffmpegLoading;
       ffmpegLoading = (async () => {
-        if (!window.FFmpegWASM) throw new Error('ffmpeg.wasm script failed to load');
-        if (!window.FFmpegUtil || !window.FFmpegUtil.toBlobURL) {
-          throw new Error('@ffmpeg/util script failed to load');
+        if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
+          throw new Error('ffmpeg.wasm script failed to load — check network');
         }
-        const { FFmpeg } = window.FFmpegWASM;
-        const { toBlobURL } = window.FFmpegUtil;
+        const { createFFmpeg } = window.FFmpeg;
 
-        const f = new FFmpeg();
-        f.on('progress', ({ progress }) => {
-          const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
-          document.getElementById('encodeProgress').style.width = pct + '%';
-        });
-        f.on('log', ({ message }) => {
-          if (message && message.length < 500) console.log('[ffmpeg]', message);
-        });
-
-        // When this HTML is opened from disk (file://) the browser blocks
-        // cross-origin Workers. Fetching each asset and wrapping it in a
-        // same-origin Blob URL is the documented offline/local-file pattern
-        // for ffmpeg.wasm 0.12.x. We use jsdelivr — unpkg has occasional
-        // 502s and slow worker chunk responses.
-        const ffmpegBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-        const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
         const banner = document.getElementById('encodeBannerText');
         const setText = (s) => {
           if (banner) banner.textContent = s;
           console.log('[ffmpeg-init]', s);
         };
 
-        setText('Fetching ffmpeg worker chunk…');
-        const classWorkerURL = await toBlobURL(`${ffmpegBase}/814.ffmpeg.js`, 'text/javascript');
-        console.log('[ffmpeg-init] classWorkerURL ready:', classWorkerURL);
+        setText('Initializing ffmpeg.wasm (~25 MB core, first run only)…');
+        const f = createFFmpeg({
+          log: true,
+          corePath: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+          progress: ({ ratio }) => {
+            const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+            document.getElementById('encodeProgress').style.width = pct + '%';
+          },
+          logger: ({ message }) => {
+            if (message && message.length < 500) console.log('[ffmpeg]', message);
+          },
+        });
 
-        setText('Fetching ffmpeg core JS (~5 MB)…');
-        const coreURL = await toBlobURL(`${coreBase}/ffmpeg-core.js`, 'text/javascript');
-        console.log('[ffmpeg-init] coreURL ready:', coreURL);
-
-        setText('Fetching ffmpeg core wasm (~30 MB, first run only)…');
-        const wasmURL = await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm');
-        console.log('[ffmpeg-init] wasmURL ready:', wasmURL);
-
-        setText('Initializing ffmpeg.wasm (spawning worker, compiling wasm)…');
-        // Race against a 60s timeout so a silent worker failure doesn't
-        // hang the UI forever — surfaces a real error message instead.
-        const loadPromise = f.load({ classWorkerURL, coreURL, wasmURL });
+        const loadPromise = f.load();
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error(
-            'ffmpeg.load() timed out after 60s. Check DevTools console for [ffmpeg] log lines and any worker errors. ' +
-            'Common cause when opening from file://: Chrome blocks the worker silently. Try serving via http://localhost (e.g. via the Vite dev server) and reload.'
-          )), 60000)
+            'ffmpeg.load() timed out after 90s. Check DevTools console for errors. ' +
+            'If your network blocks jsdelivr.net, try a different network.'
+          )), 90000)
         );
         await Promise.race([loadPromise, timeoutPromise]);
         console.log('[ffmpeg-init] load complete');
@@ -1198,6 +1180,11 @@
         return f;
       })();
       return ffmpegLoading;
+    }
+
+    async function fetchFileAsUint8(blob) {
+      const buf = await blob.arrayBuffer();
+      return new Uint8Array(buf);
     }
 
     const REENCODE_FPS_TARGETS = [15, 30, 60, 120];
@@ -1222,14 +1209,13 @@
       reencodeBtn.disabled = true;
       banner.style.display = '';
       try {
-        text.textContent = 'Loading ffmpeg.wasm (~30 MB, first run only)…';
+        text.textContent = 'Loading ffmpeg.wasm (~25 MB, first run only)…';
         fill.style.width = '0%';
         const ffmpeg = await getFfmpeg();
 
         text.textContent = 'Writing source to virtual FS…';
-        const { fetchFile } = window.FFmpegUtil;
         const inputPath = 'input.mp4';
-        await ffmpeg.writeFile(inputPath, await fetchFile(sourceBlob));
+        ffmpeg.FS('writeFile', inputPath, await fetchFileAsUint8(sourceBlob));
 
         const created = [];
         for (let i = 0; i < REENCODE_FPS_TARGETS.length; i++) {
@@ -1245,7 +1231,7 @@
           // -vf fps=N forces output frame rate (drop / duplicate as needed).
           // ultrafast preset keeps wasm encode time bearable.
           const outPath = `out_${fps}.mp4`;
-          await ffmpeg.exec([
+          await ffmpeg.run(
             '-i', inputPath,
             '-vf', `fps=${fps}`,
             '-c:v', 'libx264',
@@ -1254,8 +1240,8 @@
             '-an',
             '-pix_fmt', 'yuv420p',
             outPath,
-          ]);
-          const data = await ffmpeg.readFile(outPath);
+          );
+          const data = ffmpeg.FS('readFile', outPath);
           const blob = new Blob([data.buffer], { type: 'video/mp4' });
 
           // Parse metadata for the new variant
@@ -1273,10 +1259,10 @@
           });
 
           // Cleanup wasm FS to free memory
-          try { await ffmpeg.deleteFile(outPath); } catch {}
+          try { ffmpeg.FS('unlink', outPath); } catch {}
           created.push(outName);
         }
-        try { await ffmpeg.deleteFile(inputPath); } catch {}
+        try { ffmpeg.FS('unlink', inputPath); } catch {}
 
         text.textContent = `Done — created ${created.length} variant(s). Selecting them for comparison…`;
         await loadLibrary();
