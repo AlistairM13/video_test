@@ -397,46 +397,46 @@
     <details class="about" open>
       <summary>About this tool — what it tests, why, and what to look for</summary>
       <div class="about-body">
-        <h3>The problem</h3>
-        <p>Annotators report video buffering during high-speed review (4×–16×). Some videos stall, others don't. Different teams hit it inconsistently, so initial guesses pointed at network — slow S3 region, CDN issues, presigned URL latency, etc.</p>
+        <h3>The question</h3>
+        <p>Why do some videos stall at high playback speeds (8× / 16×) while others play smoothly, even when the bytes are fully cached and there's no network involved? Buffering at high speed is often blamed on slow networks, regions, or CDNs — this bench is here to rule those out and pin down where the bottleneck actually lives.</p>
 
         <h3>The hypothesis</h3>
-        <p>It's <strong>not the network</strong>. It's per-machine <strong>video decoder throughput</strong>. At 16× playback on a 30 fps source, the decoder needs to deliver 480 frames per second; on a 50 fps multi-cam stitch, 800 fps. Most consumer GPUs top out around 150–300 fps for H.264 1080p, so high-fps content stalls on weaker machines no matter how fast the bytes arrive.</p>
-        <p>This bench proves that by removing every network factor: videos load into IndexedDB, play from local memory via a plain <code>&lt;video&gt;</code> element, and we still see buffering on the same files annotators complain about.</p>
+        <p>It's <strong>not the network</strong>. It's per-machine <strong>video decoder throughput</strong>. At 16× playback on a 30 fps source, the decoder needs to deliver 480 frames per second; on a 50 fps source, 800 fps. Most consumer GPUs top out around 150–300 fps for H.264 1080p, so high-fps content stalls on weaker machines no matter how fast the bytes arrive.</p>
+        <p>This bench proves it by removing every network factor: videos load into IndexedDB, play from local memory via a plain <code>&lt;video&gt;</code> element, and the same buffering reproduces.</p>
 
         <h3>What <code>WAITING</code> means</h3>
-        <p>HTML video elements fire a <code>waiting</code> event whenever playback advances faster than the decoder can deliver decoded frames. Two important things:</p>
+        <p>HTML video elements fire a <code>waiting</code> event whenever playback advances faster than the decoder can deliver decoded frames. Two things to internalize:</p>
         <ul>
           <li><strong>It's not about bytes.</strong> The <code>buffered</code> stat may say "52.3s buffered" (whole file in RAM) and <code>WAITING</code> still fires repeatedly — because the bottleneck is decode, not download.</li>
-          <li><strong>It scales with playback rate.</strong> A video that plays cleanly at 1× can fire dozens of <code>WAITING</code> events per second at 16×. The decode work scales linearly with rate.</li>
+          <li><strong>It scales with playback rate.</strong> A video that plays cleanly at 1× can fire dozens of <code>WAITING</code> events per second at 16×. Decode work scales linearly with rate.</li>
         </ul>
         <p>So <span class="pill red">WAITING ≫ 0</span> at 16× = decoder bottleneck on this machine. <span class="pill green">WAITING ≈ 0</span> at 16× = decoder is keeping up.</p>
 
         <h3>How to use it</h3>
         <ol style="margin:4px 0;padding-left:20px">
-          <li>Drag one or more videos into the drop zone (originals + variants encouraged).</li>
+          <li>Drag one or more videos into the drop zone.</li>
           <li>Open one. The <strong>Container &amp; codec metadata</strong> card shows codec, fps, GOP size, and decode load at 1× / 16×. Look for ⚠ flags.</li>
           <li>Hit a speed (1× / 4× / 16×) and click <strong>▶ Record test</strong> for a 10-second run. WAITING events get saved per video.</li>
-          <li>For conclusive proof, click <strong>⚙ Re-encode @ 15/30/60/120 fps</strong> on the active video. It runs ffmpeg.wasm in your browser to produce four variants of the same source. Then auto-opens a side-by-side comparison.</li>
+          <li>For conclusive proof, click <strong>⚙ Re-encode @ 15/30/60/120 fps</strong> on the active video. It runs ffmpeg.wasm in your browser to produce four variants of the same source, then opens a side-by-side comparison.</li>
           <li>In compare mode: pick 16×, hit <strong>▶ Play all</strong>, then <strong>▶ Record 10s test (all)</strong>. Watch WAITING counts diverge — same machine, same zero-network playback, only fps differs.</li>
         </ol>
 
         <h3>What "good" and "bad" look like</h3>
         <ul>
-          <li><strong>Smooth at 16×:</strong> single-cam, ≤15 fps, &lt;1080p, H.264. Decode load &lt; ~400 MP/s at 16×. Annotators don't notice anything.</li>
-          <li><strong>Stalls at 16×:</strong> multi-cam stitches (2560×480, 6828×640), 30+ fps, very long GOP (&gt;120 frames), or H.265/AV1 without hardware decode. Decode load &gt; ~1500 MP/s at 16× usually exceeds consumer hardware.</li>
+          <li><strong>Smooth at 16×:</strong> ≤15 fps, modest resolution, H.264. Decode load &lt; ~400 MP/s at 16×.</li>
+          <li><strong>Stalls at 16×:</strong> very wide / high-resolution sources, 30+ fps, very long GOP (&gt;120 frames), or H.265/AV1 without hardware decode. Decode load &gt; ~1500 MP/s at 16× usually exceeds consumer hardware.</li>
         </ul>
         <p>The library badges (e.g. <span class="pill red">1 test · max 16× · 73 WAITING</span>) summarize each video's record. Compare badges across videos to see the pattern.</p>
 
         <h3>What this proves and what it doesn't</h3>
-        <p><strong>Proves:</strong> high-speed buffering is decoder-bound, not network-bound. Re-encoding to 15 fps fixes it; moving the bucket / changing region won't.</p>
-        <p><strong>Doesn't address:</strong> first-load latency (cold start) — that's a real network/CDN concern and a region move would help <em>that</em> separately. Two unrelated problems that look similar from the user side.</p>
+        <p><strong>Proves:</strong> high-speed buffering is decoder-bound, not network-bound. Re-encoding to a lower fps fixes it; moving content closer to the user won't.</p>
+        <p><strong>Doesn't address:</strong> first-load latency (cold start). That's a real network concern, and serving content from a closer region helps <em>that</em> separately. Two unrelated problems that look similar from the outside.</p>
 
         <h3>Caveats</h3>
         <ul>
-          <li>WAITING counts depend on <strong>your machine's GPU/CPU</strong>. The same video tested on a beefier laptop will show fewer WAITING events. That's the point — annotators are not all on the same hardware.</li>
+          <li>WAITING counts depend on <strong>your machine's GPU/CPU</strong>. The same video tested on a faster laptop will show fewer WAITING events. That's the point.</li>
           <li>Re-encoding runs in your browser via ffmpeg.wasm. It's slow (2–5 minutes for four variants of a 50-second clip). Coffee break time.</li>
-          <li>This page needs cross-origin isolation enabled (COOP/COEP) for ffmpeg.wasm. The bundled service worker handles that automatically — first visit reloads once after registering.</li>
+          <li>This page needs cross-origin isolation (COOP/COEP) for ffmpeg.wasm. The bundled service worker handles that automatically — first visit reloads once after registering.</li>
         </ul>
       </div>
     </details>
